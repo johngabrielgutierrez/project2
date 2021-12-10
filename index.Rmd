@@ -46,93 +46,195 @@ class_diag <- function(score, truth, positive, cutoff=.5){
 
 # Mining, Classification, Prediction
 
-## Name and EID here
+## John Gutierrez JGG2649
 
 ### Introduction 
 
-Paragraph or two introducing your datasets and variables, why they are interesting to you, etc. See instructions for more information
+For project 2 we will be working with the same baseball data from project 1. There are lots of variables included in the data set but we will only be playing with a couple of them (Hits, Salary, OBP, Slugging, Walks, Home Runs, W-L% (which we turn into a binary categorical variables called "Winning", where W-L% >= .500 is a "Win" season), and Games Played). Variables are for all 30 MLB teams in years 2020 and 2021 for a total of 60 observations with no NAs. All variables are averaged per-game because there were a different amount of games in those two seasons (that is to say, every time I say "Walks" on this page, I mean "Walks per game"). All ranking and batting data is from Baseball-Reference.com and salary data is from spotrac.com. The code below, much of it taken from project 1, is loading in our data and selecting the variables we're interested in.
 
 ```{R}
 library(tidyverse)
 # read your datasets in here, e.g., with read_csv()
+payroll2020 <- read_csv("2020payroll.csv")
+payroll2021 <- read_csv("2021payroll.csv")
+rank2020 <- read_csv("2020rankings.csv")
+rank2021 <- read_csv("2021rankings.csv")
+batting2021 <- read_csv("2021batting.csv")
+batting2020 <- read_csv("2020batting.csv")
 
 # if your dataset needs tidying, do so here
+payroll <- payroll2020 %>% mutate(Year=2020) %>%
+  bind_rows(payroll2021  %>% mutate(Year=2021))
+rank <- rank2020 %>% mutate(Year=2020) %>% slice(1:30) %>%
+  bind_rows(rank2021 %>% mutate(Year=2021) %>% slice(1:30))
+batting <- batting2020 %>% mutate(Year=2020) %>% slice(1:30) %>%
+  bind_rows(batting2021 %>% mutate(Year=2021) %>% slice(1:30))
+full <- rank %>% full_join(batting, by = c("Tm", "Year")) %>% full_join(payroll, 
+    by = c(Tm = "Team", "Year"))
 
-# any other code here
+df <- full %>% select(Tm, Year, Ratio=`W-L%`, Hits=H, Runs=R.y, Salary=Total, OnBasePercent=OBP, Slugging=SLG, Walks=BB, HR, BasesStolen=SB, G)
+df <- df %>% mutate(Salary=as.numeric(str_remove_all(Salary,'[$,]')), 
+                    Winning=ifelse(df$Ratio < .5, "Lose", "Win"), 
+                    YearTeam=paste(df$Year, df$Tm, sep = " "),
+                    Hits=Hits/G,
+                    Runs=Runs/G,
+                    Walks=Walks/G,
+                    HR=HR/G,
+                    BasesStolen=BasesStolen/G,
+                    Salary=Salary/G)
+df <- df %>% select(YearTeam, Winning, everything(), -Tm, -Year)
+df %>% head
 ```
 
 ### Cluster Analysis
 
 ```{R}
 library(cluster)
+pam_df <- df %>% select(Hits, Salary, OnBasePercent, Walks, HR)
 # clustering code here
+sil_width<-vector()
+for(i in 2:20){  
+  pam_fit <- pam(pam_df, k = i)  
+  sil_width[i] <- pam_fit$silinfo$avg.width  
+}
+ggplot()+geom_line(aes(x=1:20,y=sil_width))+scale_x_continuous(name="k",breaks=1:20)
+
+pam <- pam(pam_df, 8)
+pam
+pam$silinfo$avg.width
+
+library(GGally)
+pam_df %>% mutate(cluster=as.factor(pam$clustering)) %>%
+  ggpairs(aes(color=cluster), upper = list(continuous = wrap("cor", size = 1.4)))
 ```
 
-Discussion of clustering here
+Our average silhouette width, interestingly, is maximized at 8 clusters, where a reasonable structure is found. Said 8 clusters are heavily associated with the Salary variable; all 8 clusters have zero overlap in Salary. Due to the positive correlation of Salary and every other variable, the clusters also seem to have some looser boundaries in the other variables (the higher-salary clusters tend to also have more Walks, for example).
     
     
 ### Dimensionality Reduction with PCA
 
 ```{R}
 # PCA code here
+princomp(pam_df, cor=T) -> pca1
+pca1
+summary(pca1, loadings=T)
+
+library(plotly)
+library(stringi)
+
+YearTeam <- paste(full$Year, full$Tm, sep= "\n")
+pca1$scores %>% as.data.frame %>% mutate(YearTeam=stri_replace_last_fixed(YearTeam, ' ', '\n')) %>%
+  plot_ly(x= ~Comp.1,  y = ~Comp.2, z = ~Comp.3, color= ~YearTeam, type = "scatter3d", mode = "markers") %>%
+  layout(showlegend = FALSE)
 ```
 
-Discussions of PCA here. 
+PC 1 is associated positively with all 5 variables; Higher PC 1 scores tend to score higher in every variable. PC 2 is associated with a higher number of hits and a lower number of walks, and PC 3 is associated with higher numbers in every variable *except* Salary, with which is has a highly negative association. A team like the 2020 Atlanta Braves, which has a high PC1 and a high PC3, might be perceived as having great stats in spite of their smaller total Salary. All three of these PCs account for 89.5% of variance in the data.
 
 ###  Linear Classifier
 
 ```{R}
 # linear classifier code here
+class_df <- df %>% select(-YearTeam, -G, -Ratio) %>% mutate(Winning=as.factor(Winning))
+class_df
+y <- class_df$Winning
+fit <- glm(Winning ~ ., data=class_df, family="binomial")
+score <- predict(fit, type="response")
+score %>% round(3)
+class_diag(score,truth=df$Winning, positive="Win")
+table(actual=y,predicted=ifelse(score<.5,"Lose","Win"))
 ```
 
 ```{R}
 # cross-validation of linear classifier here
+library(caret)
+set.seed(1234)
+cv <- trainControl(method="cv", number = 5, classProbs = T, savePredictions = T)
+fit <- train(Winning ~ ., data=class_df, trControl=cv, method="glm")
+class_diag(fit$pred$pred %>% as.character, fit$pred$obs%>% as.character, positive="Win")
 ```
 
-Discussion here
+Our linear (logistic regression) classifier tried to predict from Hits, Runs, Salary, OBP, Slugging, Walks, HR,  and Bases Stolen whether a team had a winning season. Our model performed well at first glance (.92 AUC), but after cross validation we see a decrease in performance (.78 AUC) due to overfitting. Still not a terrible fit overall!
 
 ### Non-Parametric Classifier
 
 ```{R}
-library(caret)
 # non-parametric classifier code here
+knn_fit <- knn3(Winning ~ ., data=class_df, k=3)
+y_hat_knn <- predict(knn_fit,df)
+class_diag(y_hat_knn[,2],df$Winning, positive="Win")
+table(actual=y,predicted=ifelse(y_hat_knn[,2]<.5,"Lose","Win"))
 ```
 
 ```{R}
 # cross-validation of np classifier here
+set.seed(1234)
+k=5 #choose number of folds
+data<-class_df[sample(nrow(class_df)),] #randomly order rows
+folds<-cut(seq(1:nrow(class_df)),breaks=k,labels=F) #create folds
+diags<-NULL
+for(i in 1:k){
+  ## Create training and test sets
+  train<-data[folds!=i,] 
+  test<-data[folds==i,]
+  truth<-test$Winning ## Truth labels for fold i
+  ## Train model on training set (all but fold i)
+  fit<-knn3(Winning~.,data=train, k=3)
+  ## Test model on test set (fold i) 
+  probs<-predict(fit,newdata = test)[,2]
+  ## Get diagnostics for fold i
+  diags<-rbind(diags,class_diag(probs,truth, positive="Win"))
+}
+summarize_all(diags,mean)
 ```
 
-Discussion
+Our KNN model, attempting the same prediction as the linear model from before, also performs well at first glance (.92 AUC), but becomes pretty hot garbage when subject to cross validation (.59 AUC), suggesting heavy overfitting. Between the two, we can reasonably say that the logistic regression was a better prediction model.
 
 
 ### Regression/Numeric Prediction
 
 ```{R}
 # regression model code here
+reg_df <- df %>% select(Ratio, OnBasePercent, Slugging, Walks)
+fit<-lm(Ratio~.,data=reg_df) #predict mpg from all other variables
+yhat<-predict(fit)
+mean(reg_df$Ratio-yhat)^2
 ```
 
 ```{R}
 # cross-validation of regression model here
+set.seed(1234)
+cv <- trainControl(method="cv", number = 5, classProbs = T, savePredictions = T)
+fit <- train(Ratio~.,data=reg_df, trControl=cv, method="lm")
+fit$results$RMSE^2
 ```
 
-Discussion
+Our regression model tries to predict a team's Win/Loss ratio from their OBP, SLG, and Walks. The model shows a near-zero MSE at first, but after cross validation the MSE jumps up to around .004, suggesting there is certainly some overfitting at play.
 
 ### Python 
 
 ```{R}
 library(reticulate)
+use_python("/usr/bin/python3")
+
+list_of_teams <- full$Tm
+list_of_teams
 ```
 
 ```{python}
 # python code here
+list_of_teams = r.list_of_teams
+list_of_teams = list(set(list_of_teams))
+list_of_teams.sort()
+list_of_teams
 ```
 
-Discussion
+```{r}
+for (i in 1:length(py$list_of_teams)){
+  print(py$list_of_teams[i])
+}
+```
 
-### Concluding Remarks
 
-Include concluding remarks here, if any
-
-
+To play with Python, we took the list of teams from our R data.frame, which contained the name of each team twice, and imported it to Python. In Python, we got rid of duplicates using a set and sorted the teams into alphabetical order with .sort() before sending them back to R and printing them all out.       
 
 
